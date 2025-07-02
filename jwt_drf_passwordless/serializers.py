@@ -6,6 +6,7 @@ from .services import PasswordlessTokenService
 from django.contrib.auth.models import update_last_login
 from jwt_drf_passwordless.conf import settings
 from rest_framework_simplejwt import tokens, settings as jwt_settings
+import secrets
 
 User = get_user_model()
 
@@ -41,9 +42,23 @@ class AbstractPasswordlessTokenRequestSerializer(serializers.Serializer):
             attributes = {
                 self.token_request_identifier_field: identifier_value,
             }
-            user = User.objects.create(**attributes)
+
+            # For mobile users, ensure email is provided since StandardUserManager requires it
+            if self.token_request_identifier_field == settings.MOBILE_FIELD_NAME:
+                if "email" not in attributes:
+                    attributes["email"] = None
+
+            user = User.objects.create_user(**attributes)
+
+            # Handle password setting based on configuration
             if settings.REGISTRATION_SETS_UNUSABLE_PASSWORD:
                 user.set_unusable_password()
+            else:
+                # Set a usable password when unusable passwords are disabled
+                # Use a random password since this is passwordless authentication
+                random_password = secrets.token_urlsafe(32)
+                user.set_password(random_password)
+
             user.save()
         return user
 
