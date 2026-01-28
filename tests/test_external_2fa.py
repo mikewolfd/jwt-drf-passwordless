@@ -8,7 +8,9 @@ to avoid making actual API calls during testing.
 from unittest.mock import Mock, patch
 
 import pytest
+from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
+from django.test.utils import override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
@@ -306,6 +308,12 @@ class MockExternal2FAProvider(External2FAProvider):
 # ============================================================================
 
 
+class CustomTokenResponse:
+    @classmethod
+    def generate_auth_token(cls, user):
+        return {"access": "custom-access", "refresh": "custom-refresh", "custom": True}
+
+
 @pytest.mark.django_db
 class TestExternal2FAViews:
     """Integration tests for external 2FA views."""
@@ -363,13 +371,40 @@ class TestExternal2FAViews:
         mock_provider = MockExternal2FAProvider()
         mock_get_provider.return_value = mock_provider
 
+        # Use a valid phone number format for a non-existent user
         response = api_client.post(
             "/passwordless/external/request/",
-            {"phone_number": "+19995551234"},  # Non-existent user
+            {"phone_number": "+12025550198"},  # Non-existent user
             format="json",
         )
 
         assert response.status_code == status.HTTP_400_BAD_REQUEST
+
+    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
+    @patch("jwt_drf_passwordless.external_2fa.serializers.settings")
+    def test_request_verification_creates_user_when_registration_enabled(
+        self, mock_settings, mock_get_provider, api_client
+    ):
+        # Configure mock settings for user registration
+        mock_settings.REGISTER_NONEXISTENT_USERS = True
+        mock_settings.REGISTRATION_SETS_UNUSABLE_PASSWORD = True
+        mock_settings.MOBILE_FIELD_NAME = "phone_number"
+
+        mock_provider = MockExternal2FAProvider()
+        mock_get_provider.return_value = mock_provider
+
+        # Use a valid US phone number format (555 is reserved for testing)
+        phone_number = "+12025550199"
+        assert not User.objects.filter(phone_number=phone_number).exists()
+
+        response = api_client.post(
+            "/passwordless/external/request/",
+            {"phone_number": phone_number},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert User.objects.filter(phone_number=phone_number).exists()
 
     @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
     def test_request_verification_provider_not_configured(
@@ -401,6 +436,34 @@ class TestExternal2FAViews:
         assert response.status_code == status.HTTP_200_OK
         assert "access" in response.data
         assert "refresh" in response.data
+
+    @override_settings(
+        JWT_DRF_PASSWORDLESS=dict(
+            django_settings.JWT_DRF_PASSWORDLESS,
+            **{
+                "SERIALIZERS": {
+                    "passwordless_token_response_class": "tests.test_external_2fa.CustomTokenResponse"
+                }
+            },
+        )
+    )
+    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
+    def test_verify_code_honors_custom_token_response_class(
+        self, mock_get_provider, api_client, user_with_phone
+    ):
+        mock_provider = MockExternal2FAProvider()
+        mock_get_provider.return_value = mock_provider
+
+        response = api_client.post(
+            "/passwordless/external/verify/",
+            {"phone_number": "+13035551234", "code": "123456"},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.data["access"] == "custom-access"
+        assert response.data["refresh"] == "custom-refresh"
+        assert response.data["custom"] is True
 
     @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
     def test_verify_code_rejected(
@@ -828,3 +891,93 @@ class TestWebhookView:
         finally:
             verification_webhook_received.disconnect(on_webhook_received)
             verification_delivered.disconnect(on_delivered)
+
+    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
+    def test_webhook_signature_verification_failed(self, mock_get_provider, api_client):
+        """Test that invalid signatures are rejected."""
+        mock_provider = Mock()
+        mock_provider.verify_webhook_signature.return_value = False
+        mock_get_provider.return_value = mock_provider
+
+        response = api_client.post(
+            "/passwordless/external/webhook/",
+            {"data": {}},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+        assert "Invalid signature" in response.data["detail"]
+
+
+# ============================================================================
+# Signature Verification Tests
+# ============================================================================
+
+
+class TestTelnyxSignatureVerification:
+    """Tests for Telnyx webhook signature verification."""
+
+    def test_no_public_key_returns_true(self):
+        """Without a public key, verification is skipped (returns True)."""
+        provider = TelnyxVerifyProvider(
+            api_key="test_key",
+            verify_profile_id="test_profile",
+            webhook_public_key=None,
+        )
+
+        result = provider.verify_webhook_signature(
+            payload=b'{"data": {}}',
+            signature="some_signature",
+            timestamp="1234567890",
+        )
+
+        assert result is True
+
+    def test_missing_signature_returns_false(self):
+        """Missing signature header should fail verification."""
+        provider = TelnyxVerifyProvider(
+            api_key="test_key",
+            verify_profile_id="test_profile",
+            webhook_public_key="dGVzdF9wdWJsaWNfa2V5",  # base64 test key
+        )
+
+        result = provider.verify_webhook_signature(
+            payload=b'{"data": {}}',
+            signature="",  # Missing
+            timestamp="1234567890",
+        )
+
+        assert result is False
+
+    def test_missing_timestamp_returns_false(self):
+        """Missing timestamp header should fail verification."""
+        provider = TelnyxVerifyProvider(
+            api_key="test_key",
+            verify_profile_id="test_profile",
+            webhook_public_key="dGVzdF9wdWJsaWNfa2V5",
+        )
+
+        result = provider.verify_webhook_signature(
+            payload=b'{"data": {}}',
+            signature="some_signature",
+            timestamp="",  # Missing
+        )
+
+        assert result is False
+
+    def test_invalid_signature_returns_false(self):
+        """Invalid signature should fail verification."""
+        provider = TelnyxVerifyProvider(
+            api_key="test_key",
+            verify_profile_id="test_profile",
+            webhook_public_key="dGVzdF9wdWJsaWNfa2V5",  # Not a real Ed25519 key
+        )
+
+        result = provider.verify_webhook_signature(
+            payload=b'{"data": {}}',
+            signature="aW52YWxpZF9zaWduYXR1cmU=",  # Invalid
+            timestamp="1234567890",
+        )
+
+        # Should return False due to invalid key/signature
+        assert result is False
