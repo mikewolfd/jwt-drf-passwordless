@@ -3,83 +3,89 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-This is `jwt-drf-passwordless`, a Django Rest Framework addon that provides passwordless authentication using JWT tokens. Users can authenticate via email or SMS by receiving and redeeming short-lived tokens.
 
-## Development Commands
+`jwt-drf-passwordless` is a Django app providing stateless passwordless authentication via email or SMS. It generates short numeric tokens (for SMS) and long alphanumeric tokens (for magic links), exchangeable for JWT access/refresh tokens. Built on `djangorestframework-simplejwt`, `django-sms`, and `django-phonenumber-field`.
 
-### Testing
-- `./runtests.py` - Run all tests with pytest
-- `./runtests.py --fast` - Run tests quickly without linting
-- `./runtests.py TestClassName` - Run specific test class
-- `./runtests.py test_function_name` - Run specific test function
-- `./runtests.py --lintonly` - Run only linting checks
-- `poetry run pytest` - Alternative test runner
-- `poetry run tox` - Run tests across multiple Python versions
+**Status**: Alpha - Work in Progress
 
-### Code Quality
-- `make lint` or `make lint/black` - Check code formatting with black
-- `black --check jwt_drf_passwordless tests` - Direct black check
-- `flake8 jwt_drf_passwordless tests` - Lint with flake8
+## Common Commands
 
-### Package Management
-- `poetry install` - Install dependencies
-- `poetry build` - Build package for distribution
-- `make clean` - Clean build artifacts
+```bash
+# Install dependencies
+make install          # or: poetry install
 
-### Documentation
-- `make docs` - Generate Sphinx documentation
-- `make servedocs` - Watch and rebuild docs on changes
+# Run tests
+make test             # Quick test with default Python
+make test-all         # Tox multi-version testing (3.10, 3.11, 3.12)
+./runtests.py         # Direct pytest execution
 
-## Architecture Overview
+# Run a single test
+pytest tests/test_token_exchange.py::test_exchange_short_token_with_email -v
 
-### Core Components
-1. **Views** (`views.py`): API endpoints for token request and exchange
-   - `PasswordlessEmailTokenRequestView` - Request token via email
-   - `PasswordlessMobileTokenRequestView` - Request token via SMS
-   - `EmailExchangePasswordlessTokenForAuthTokenView` - Exchange email token for JWT
-   - `MobileExchangePasswordlessTokenForAuthTokenView` - Exchange mobile token for JWT
+# Linting
+make lint             # Black format check
+flake8 jwt_drf_passwordless tests --ignore=E501
 
-2. **Models** (`models.py`): Token storage and management
-   - `PasswordlessChallengeToken` - Stores both long and short tokens with usage tracking
+# Build package
+poetry build          # Creates dist/
+make dist             # Clean build
+```
 
-3. **Services** (`services.py`): Business logic for token operations
-   - `PasswordlessTokenService` - Creates, validates, and manages tokens
+## Architecture
 
-4. **Serializers** (`serializers.py`): Request/response validation and JWT generation
-   - Request serializers handle token requests
-   - Exchange serializers validate tokens and return JWTs
+### Authentication Flow (2-Step Process)
 
-### Security Model
-- **Dual Token System**: Long tokens for magic links, short tokens for SMS/manual entry
-- **Throttling**: Built-in rate limiting for token requests
-- **Token Lifecycle**: Automatic expiration and usage limits
-- **Admin Protection**: Optional blocking of admin user passwordless auth
+1. **Token Request**: User submits email/phone → System generates short (6-digit) + long (64-char) tokens → Stores in `PasswordlessChallengeToken` → Sends via email/SMS
 
-### Key Settings
-Configuration is handled through Django settings under `jwt_drf_passwordless` key. Important settings include:
-- `ALLOWED_PASSWORDLESS_METHODS` - Enable email/mobile auth
-- `TOKEN_LIFETIME` - Token expiration time
-- `MAX_TOKEN_USES` - How many times a token can be redeemed
-- `TOKEN_REQUEST_THROTTLE_SECONDS` - Rate limiting interval
+2. **Token Exchange**: User submits token + identifier → `PasswordlessTokenService.check_token()` validates → Returns JWT access/refresh tokens
 
-## File Structure
-- `/jwt_drf_passwordless/` - Main package
-- `/tests/` - Test suite with pytest
-- `/docs/` - Sphinx documentation
-- `pyproject.toml` - Poetry configuration and dependencies
-- `Makefile` - Development commands
-- `tox.ini` - Multi-version testing configuration
+### Key Components
 
-## Dependencies
-- Django 5.x with DRF for web framework
-- `djangorestframework-simplejwt` for JWT token generation
-- `django-sms` for SMS functionality
-- `django-phonenumber-field` for phone number validation
-- `django-templated-mail-2` for email templates
+| Component | Purpose |
+|-----------|---------|
+| `services.py` | `PasswordlessTokenService` - Token creation, validation, throttling |
+| `views.py` | Abstract base views + 4 concrete views for email/mobile request/exchange |
+| `serializers.py` | Mixin-based serializers with dynamic field injection |
+| `conf.py` | Lazy-loading settings with dynamic class import via `ObjDict` |
+| `models.py` | `PasswordlessChallengeToken` with custom manager for cleanup |
 
-## Testing Strategy
-Uses pytest with Django integration. Tests cover:
-- Token request flows for email/mobile
-- Token exchange and validation
-- Security scenarios and edge cases
-- Configuration variations
+### API Endpoints
+
+```
+POST /passwordless/request/email/   → {"email": "..."}
+POST /passwordless/request/mobile/  → {"phone_number": "..."}
+POST /passwordless/exchange/email/  → {"token": "...", "email": "..."}
+POST /passwordless/exchange/mobile/ → {"token": "...", "phone_number": "..."}
+```
+
+### Configuration System
+
+Settings in `conf.py` use lazy loading with `LazySettings` wrapper. Configure via Django settings:
+
+```python
+JWT_DRF_PASSWORDLESS = {
+    "SHORT_TOKEN_LENGTH": 6,
+    "LONG_TOKEN_LENGTH": 64,
+    "TOKEN_LIFETIME": 600,  # seconds
+    "MAX_TOKEN_USES": 1,
+    "ALLOWED_PASSWORDLESS_METHODS": ["EMAIL", "MOBILE"],
+    # ... see conf.py for full list
+}
+```
+
+### Extensibility Points
+
+- **Rate limiting**: Override `DECORATORS.token_request_rate_limit_decorator` (default is no-op)
+- **User activation**: Listen to `user_activated` signal in `signals.py`
+- **Serializers**: Override via `SERIALIZERS` config for custom validation
+- **Permissions**: Override via `PERMISSIONS` config for custom auth requirements
+
+## Testing
+
+Tests use pytest-django with:
+- In-memory SQLite database
+- Console email backend
+- Local memory SMS backend
+- Two test user models: `StandardUser` (AbstractUser) and `CustomUser` (custom fields)
+
+Test helpers in `tests/common.py`: `create_user()`, `create_token()`
