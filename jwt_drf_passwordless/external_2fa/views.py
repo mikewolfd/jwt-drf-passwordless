@@ -65,10 +65,12 @@ def get_external_2fa_provider():
     # Get configuration for the provider
     api_key = external_2fa_config.get("api_key", "")
     verify_profile_id = external_2fa_config.get("verify_profile_id", "")
+    webhook_public_key = external_2fa_config.get("webhook_public_key", "")
 
     return provider_class(
         api_key=api_key,
         verify_profile_id=verify_profile_id,
+        webhook_public_key=webhook_public_key,
     )
 
 
@@ -102,7 +104,7 @@ class External2FARequestView(APIView):
         )
         serializer.is_valid(raise_exception=True)
 
-        user = serializer.validated_data.get("user")
+        user = serializer.save()
         phone_number = str(serializer.validated_data["phone_number"])
 
         # Check admin restriction
@@ -257,6 +259,21 @@ class External2FAWebhookView(APIView):
         try:
             # Get the raw body for signature verification
             raw_body = request.body
+
+            # Verify webhook signature (Telnyx uses Ed25519)
+            signature = request.headers.get("Telnyx-Signature-Ed25519", "")
+            timestamp = request.headers.get("Telnyx-Timestamp", "")
+
+            if not provider.verify_webhook_signature(
+                payload=raw_body,
+                signature=signature,
+                timestamp=timestamp,
+            ):
+                logger.warning("Webhook signature verification failed")
+                return Response(
+                    {"detail": "Invalid signature"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
 
             # Parse the JSON payload
             if isinstance(request.data, dict):
