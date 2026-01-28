@@ -52,20 +52,34 @@ Although token requests are throttled by default, and token lifetime is limited,
 
 * Set `DECORATORS.token_redeem_rate_limit_decorator` or `DECORATORS.token_request_rate_limit_decorator` with your choice of request throttling library. - **Tradeoff** is that if there is an attacker hitting your service, you might prevent **any** user from logging in because someone is hitting this endpoint, so beware how you implement it. Note that because request limiting usually requires a key value db like redis, it is explicitly left out of this project to reduce it's dependencies and configuration needs.
 
+* **Use External 2FA Providers** - Services like Telnyx Verify and Twilio Verify handle rate limiting, code generation, and delivery tracking. They also provide carrier-level fraud detection. - **Tradeoff** is vendor dependency and per-verification costs, but significantly improved security posture.
+
+### Webhook Security
+
+When using external 2FA providers, always enable webhook signature verification to prevent spoofed delivery events. For Telnyx, configure `webhook_public_key` in your settings to enable Ed25519 signature verification.
+
 ## Features
 * International phone number validation and standardization (expects db phone numbers to be in same format)
 * Basic throttling
 * Stateless JWT tokens by default
 * Short (for SMS) and long tokens for magic links
-* Configurable serializers, permissions and decorators.
+* Configurable serializers, permissions and decorators
+* **External 2FA provider support** (Telnyx, Twilio, etc.) - delegate code generation to trusted providers
 
 ## URLs and Examples:
 
 #### Available URLS
-* `request/email/`
-* `request/mobile`
-* `exchange/email/`
-* `exchange/mobile/`
+
+**Internal Token Flow** (tokens generated and stored locally):
+* `request/email/` - Request token via email
+* `request/mobile/` - Request token via SMS
+* `exchange/email/` - Exchange email token for JWT
+* `exchange/mobile/` - Exchange mobile token for JWT
+
+**External 2FA Flow** (tokens managed by external provider):
+* `external/request/` - Request verification via external provider
+* `external/verify/` - Verify code and get JWT tokens
+* `external/webhook/` - Receive delivery status webhooks
 
 **Requesting a token**
 ```.sh
@@ -98,6 +112,43 @@ curl --request POST \
 }
 ```
 
+### External 2FA Provider Flow
+
+When using an external provider like Telnyx Verify, the provider handles code generation and delivery.
+
+**Requesting verification via external provider**
+```.sh
+curl --request POST \
+  --url http://localhost:8000/passwordless/external/request/ \
+  --header 'Content-Type: application/json' \
+  --data '{
+	"phone_number": "+13035551234"
+}'
+```
+Response
+```.json
+{
+	"detail": "A token has been sent to you"
+}
+```
+
+**Verifying code and getting JWT tokens**
+```.sh
+curl --request POST \
+  --url http://localhost:8000/passwordless/external/verify/ \
+  --header 'Content-Type: application/json' \
+  --data '{
+	"phone_number": "+13035551234",
+	"code": "123456"
+}'
+```
+```.json
+{
+	"refresh": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+	"access": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."
+}
+```
+
 ## Config
 
 #### Basic configuration
@@ -120,7 +171,77 @@ curl --request POST \
   
 #### Advanced configuration
 
+##### External 2FA Provider
 
+To use an external 2FA provider like Telnyx or Twilio instead of internal token generation:
+
+```.py
+JWT_DRF_PASSWORDLESS = {
+    "ALLOWED_PASSWORDLESS_METHODS": ["MOBILE"],
+    "EXTERNAL_2FA": {
+        "provider": "jwt_drf_passwordless.external_2fa.TelnyxVerifyProvider",
+        "api_key": "YOUR_TELNYX_API_KEY",
+        "verify_profile_id": "YOUR_TELNYX_VERIFY_PROFILE_ID",
+        "webhook_public_key": "YOUR_TELNYX_PUBLIC_KEY",  # For webhook signature verification
+    },
+}
+```
+
+**Supported Providers:**
+* `jwt_drf_passwordless.external_2fa.TelnyxVerifyProvider` - Telnyx Verify API
+
+**Creating a Custom Provider:**
+
+Implement the `External2FAProvider` abstract class:
+
+```.py
+from jwt_drf_passwordless.external_2fa import External2FAProvider, External2FAResult, VerificationStatus
+
+class MyProvider(External2FAProvider):
+    def send_verification(self, phone_number, method=VerificationMethod.SMS):
+        # Send code via your provider
+        return External2FAResult(success=True, status=VerificationStatus.PENDING)
+
+    def verify_code(self, phone_number, code):
+        # Verify code with your provider
+        return External2FAResult(success=True, status=VerificationStatus.ACCEPTED)
+
+    def cancel_verification(self, phone_number):
+        return External2FAResult(success=True, status=VerificationStatus.EXPIRED)
+```
+
+##### Webhook Configuration
+
+External providers send delivery status updates via webhooks. Configure your provider to send webhooks to:
+
+```
+POST https://your-domain.com/passwordless/external/webhook/
+```
+
+**Telnyx Webhook Setup:**
+1. In Telnyx Mission Control, configure your Verify Profile webhook URL
+2. Set `webhook_public_key` in your config for Ed25519 signature verification
+3. Whitelist Telnyx IPs: `192.76.120.192/27`
+
+**Listening to Webhook Events:**
+
+```.py
+from django.dispatch import receiver
+from jwt_drf_passwordless.external_2fa.signals import (
+    verification_delivered,
+    verification_delivery_failed,
+)
+
+@receiver(verification_delivered)
+def on_delivered(sender, event, phone_number, **kwargs):
+    # Log successful delivery
+    pass
+
+@receiver(verification_delivery_failed)
+def on_failed(sender, event, phone_number, error, **kwargs):
+    # Alert on delivery failure
+    pass
+```
 
 ## Credits
 This package was created with Cookiecutter_ and the `audreyr/cookiecutter-pypackage`_ project template.
