@@ -70,6 +70,15 @@ default_settings = {
         }
     ),
     "CONSTANTS": ObjDict({"messages": "jwt_drf_passwordless.constants.Messages"}),
+    # External 2FA provider configuration (e.g., Telnyx, Twilio)
+    # Set to None to use internal token generation
+    "EXTERNAL_2FA": None,
+    # Example configuration for Telnyx:
+    # "EXTERNAL_2FA": {
+    #     "provider": "jwt_drf_passwordless.external_2fa.TelnyxVerifyProvider",
+    #     "api_key": "YOUR_TELNYX_API_KEY",
+    #     "verify_profile_id": "YOUR_VERIFY_PROFILE_ID",
+    # },
 }
 
 
