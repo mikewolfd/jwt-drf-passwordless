@@ -95,10 +95,9 @@ class External2FAVerifySerializer(serializers.Serializer):
         validated_data["user"] = user
         return validated_data
 
-    @classmethod
-    def generate_auth_token(cls, user):
+    def generate_auth_token(self, user):
         """Generate JWT tokens for the authenticated user."""
-        return DefaultJwtTokenGenerator.generate_auth_token(user)
+        return self.token_serializer_class.generate_auth_token(user)  # type: ignore[attr-defined]
 
 
 class DefaultJwtTokenGenerator:
