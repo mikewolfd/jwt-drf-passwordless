@@ -15,14 +15,24 @@ Configuration:
             "provider": "jwt_drf_passwordless.external_2fa.TelnyxVerifyProvider",
             "api_key": "YOUR_TELNYX_API_KEY",
             "verify_profile_id": "YOUR_VERIFY_PROFILE_ID",
+            # Optional: webhook signature verification (get from Mission Control Portal)
+            "webhook_public_key": "YOUR_TELNYX_PUBLIC_KEY",
         }
     }
+
+Webhook Security:
+    Telnyx signs webhooks using Ed25519. The signature is sent in the
+    `telnyx-signature-ed25519` header, and the timestamp in `telnyx-timestamp`.
+    Get your public key from: https://portal.telnyx.com/#/api-keys/public-key
 """
 
+import base64
 import logging
 from typing import Optional
 
 import requests
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .base import (DeliveryStatus, External2FAProvider, External2FAResult,
                    VerificationMethod, VerificationStatus, WebhookEvent,
@@ -47,6 +57,7 @@ class TelnyxVerifyProvider(External2FAProvider):
         api_key: str,
         verify_profile_id: str,
         timeout: int = 30,
+        webhook_public_key: Optional[str] = None,
     ):
         """
         Initialize the Telnyx Verify provider.
@@ -55,10 +66,13 @@ class TelnyxVerifyProvider(External2FAProvider):
             api_key: Telnyx API key (Bearer token)
             verify_profile_id: UUID of the Verify Profile to use
             timeout: Request timeout in seconds
+            webhook_public_key: Ed25519 public key for webhook signature
+                verification. Get from Mission Control Portal.
         """
         self.api_key = api_key
         self.verify_profile_id = verify_profile_id
         self.timeout = timeout
+        self.webhook_public_key = webhook_public_key
 
     def _get_headers(self) -> dict:
         """Get HTTP headers for Telnyx API requests."""
@@ -345,3 +359,61 @@ class TelnyxVerifyProvider(External2FAProvider):
             "delivery_unconfirmed": DeliveryStatus.DELIVERY_UNCONFIRMED,
         }
         return mapping.get(status_str)
+
+    def verify_webhook_signature(
+        self,
+        payload: bytes,
+        signature: str,
+        timestamp: Optional[str] = None,
+    ) -> bool:
+        """
+        Verify the webhook signature using Ed25519.
+
+        Telnyx signs webhooks with Ed25519. The signature is computed over
+        the string: "{timestamp}|{payload}".
+
+        Args:
+            payload: Raw request body bytes
+            signature: Base64-encoded signature from `telnyx-signature-ed25519` header
+            timestamp: Unix timestamp from `telnyx-timestamp` header
+
+        Returns:
+            True if signature is valid, False otherwise
+
+        Note:
+            If webhook_public_key is not configured, this method returns True
+            (signature verification is optional but recommended).
+        """
+        if not self.webhook_public_key:
+            logger.warning(
+                "Webhook signature verification skipped - no public key configured. "
+                "Get your public key from https://portal.telnyx.com/#/api-keys/public-key"
+            )
+            return True
+
+        if not signature or not timestamp:
+            logger.warning("Missing signature or timestamp headers")
+            return False
+
+        try:
+            # Build the signed payload: "{timestamp}|{payload}"
+            if isinstance(payload, bytes):
+                payload_str = payload.decode("utf-8")
+            else:
+                payload_str = str(payload)
+
+            signed_payload = f"{timestamp}|{payload_str}"
+
+            # Decode the signature and public key from base64
+            signature_bytes = base64.b64decode(signature)
+            public_key_bytes = base64.b64decode(self.webhook_public_key)
+
+            # Load the public key and verify
+            public_key = Ed25519PublicKey.from_public_bytes(public_key_bytes)
+            public_key.verify(signature_bytes, signed_payload.encode("utf-8"))
+
+            return True
+
+        except (InvalidSignature, ValueError, TypeError) as e:
+            logger.warning("Webhook signature verification failed: %s", e)
+            return False
