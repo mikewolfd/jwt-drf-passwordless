@@ -78,6 +78,9 @@ default_settings = {
     #     "provider": "jwt_drf_passwordless.external_2fa.TelnyxVerifyProvider",
     #     "api_key": "YOUR_TELNYX_API_KEY",
     #     "verify_profile_id": "YOUR_VERIFY_PROFILE_ID",
+    #     # Optional: webhook signature verification (recommended for production)
+    #     # Get from: https://portal.telnyx.com/#/api-keys/public-key
+    #     "webhook_public_key": "YOUR_TELNYX_PUBLIC_KEY",
     # },
 }
 
@@ -105,7 +108,10 @@ class Settings:
         for setting_name, setting_value in overriden_settings.items():
             value = setting_value
             if isinstance(setting_value, dict):
-                value = getattr(self, setting_name, {})
+                current_value = getattr(self, setting_name, None)
+                if not isinstance(current_value, dict):
+                    current_value = {}
+                value = ObjDict(current_value)
                 value.update(ObjDict(setting_value))
             setattr(self, setting_name, value)
 
