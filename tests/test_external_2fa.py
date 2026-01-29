@@ -275,6 +275,92 @@ class TestTelnyxVerifyProvider:
 
 
 # ============================================================================
+# Fake Provider Tests
+# ============================================================================
+
+
+class TestFakeVerifyProvider:
+    """Tests for the built-in FakeVerifyProvider test double."""
+
+    def test_correct_code_accepted(self):
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider()
+        result = provider.verify_code("+13035551234", "12345")
+
+        assert result.success is True
+        assert result.status == VerificationStatus.ACCEPTED
+
+    def test_wrong_code_rejected(self):
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider()
+        result = provider.verify_code("+13035551234", "99999")
+
+        assert result.success is False
+        assert result.status == VerificationStatus.REJECTED
+
+    def test_custom_code(self):
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider(code="77777")
+        result = provider.verify_code("+13035551234", "77777")
+
+        assert result.success is True
+        assert result.status == VerificationStatus.ACCEPTED
+
+        # Default code should now be rejected
+        result = provider.verify_code("+13035551234", "12345")
+        assert result.success is False
+        assert result.status == VerificationStatus.REJECTED
+
+    def test_send_verification_returns_pending(self):
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider()
+        result = provider.send_verification("+13035551234")
+
+        assert result.success is True
+        assert result.status == VerificationStatus.PENDING
+        assert result.verification_id is not None
+
+    def test_cancel_returns_expired(self):
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider()
+        result = provider.cancel_verification("+13035551234")
+
+        assert result.success is True
+        assert result.status == VerificationStatus.EXPIRED
+
+    def test_is_configured_returns_true(self):
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider()
+        assert provider.is_configured() is True
+
+    def test_accepts_arbitrary_kwargs(self):
+        """Provider ignores kwargs like api_key so it's a drop-in for any real provider."""
+        from jwt_drf_passwordless.external_2fa.testing import FakeVerifyProvider
+
+        provider = FakeVerifyProvider(
+            api_key="ignored",
+            verify_profile_id="ignored",
+            webhook_public_key="ignored",
+        )
+        assert provider.is_configured() is True
+        result = provider.verify_code("+13035551234", "12345")
+        assert result.success is True
+
+    def test_importable_from_package(self):
+        """FakeVerifyProvider should be importable from the package root."""
+        from jwt_drf_passwordless.external_2fa import FakeVerifyProvider
+
+        provider = FakeVerifyProvider()
+        assert provider.is_configured() is True
+
+
+# ============================================================================
 # Mock Provider for View Tests
 # ============================================================================
 
@@ -524,6 +610,64 @@ class TestExternal2FAViews:
 
         user_with_phone.refresh_from_db()
         assert user_with_phone.is_active is True
+
+    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
+    def test_verify_calls_on_verification_accepted_callback(
+        self, mock_get_provider, api_client, user_with_phone, settings
+    ):
+        """Callback is called on successful verification with correct args."""
+        mock_provider = MockExternal2FAProvider()
+        mock_get_provider.return_value = mock_provider
+
+        callback = Mock()
+        settings.JWT_DRF_PASSWORDLESS = {
+            "ALLOWED_PASSWORDLESS_METHODS": ["EMAIL", "MOBILE"],
+            "CALLBACKS": {
+                "on_verification_accepted": callback,
+            },
+        }
+
+        response = api_client.post(
+            "/passwordless/external/verify/",
+            {"phone_number": "+13035551234", "code": "123456"},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        callback.assert_called_once()
+        call_kwargs = callback.call_args[1]
+        assert call_kwargs["user"] == user_with_phone
+        assert call_kwargs["phone_number"] == "+13035551234"
+        assert "request" in call_kwargs
+
+    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
+    def test_verify_callback_not_called_on_rejection(
+        self, mock_get_provider, api_client, user_with_phone, settings
+    ):
+        """Callback is NOT called when verification is rejected."""
+        mock_provider = MockExternal2FAProvider()
+        mock_provider.verify_result = External2FAResult(
+            success=False,
+            status=VerificationStatus.REJECTED,
+        )
+        mock_get_provider.return_value = mock_provider
+
+        callback = Mock()
+        settings.JWT_DRF_PASSWORDLESS = {
+            "ALLOWED_PASSWORDLESS_METHODS": ["EMAIL", "MOBILE"],
+            "CALLBACKS": {
+                "on_verification_accepted": callback,
+            },
+        }
+
+        response = api_client.post(
+            "/passwordless/external/verify/",
+            {"phone_number": "+13035551234", "code": "000000"},
+            format="json",
+        )
+
+        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        callback.assert_not_called()
 
 
 # ============================================================================

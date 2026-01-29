@@ -192,6 +192,11 @@ class External2FAVerifyView(APIView):
                     request=request,
                 )
 
+            # Fire callback if configured
+            callback = settings.CALLBACKS.on_verification_accepted
+            if callback:
+                callback(user=user, phone_number=phone_number, request=request)
+
             # Generate JWT tokens
             tokens = serializer.generate_auth_token(user)
             return Response(data=tokens, status=status.HTTP_200_OK)

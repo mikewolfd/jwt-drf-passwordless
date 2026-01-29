@@ -243,6 +243,63 @@ def on_failed(sender, event, phone_number, error, **kwargs):
     pass
 ```
 
+##### Testing with FakeVerifyProvider
+
+The package includes a built-in fake provider for use in test suites and local development. It accepts a fixed code (default `"12345"`) with no network calls:
+
+```.py
+# settings/test.py (or conftest.py override)
+JWT_DRF_PASSWORDLESS = {
+    "ALLOWED_PASSWORDLESS_METHODS": ["MOBILE"],
+    "EXTERNAL_2FA": {
+        "provider": "jwt_drf_passwordless.external_2fa.FakeVerifyProvider",
+        "api_key": "ignored",
+        "verify_profile_id": "ignored",
+    },
+}
+```
+
+In your tests, POST to `/passwordless/external/verify/` with `"code": "12345"` and it will succeed. To use a custom code:
+
+```.py
+JWT_DRF_PASSWORDLESS = {
+    ...
+    "EXTERNAL_2FA": {
+        "provider": "jwt_drf_passwordless.external_2fa.FakeVerifyProvider",
+        "code": "99999",  # passed as kwarg to the provider constructor
+    },
+}
+```
+
+##### Callbacks
+
+React to verification events without subclassing views. Configure a dotted import path:
+
+```.py
+JWT_DRF_PASSWORDLESS = {
+    "CALLBACKS": {
+        "on_verification_accepted": "myapp.auth.on_phone_verified",
+    },
+}
+```
+
+The callback is called after a successful external 2FA verification, before JWT tokens are returned:
+
+```.py
+# myapp/auth.py
+def on_phone_verified(user, phone_number, request):
+    user.phone_verified = True
+    user.save(update_fields=["phone_verified"])
+```
+
+**Signature:** `callback(user, phone_number, request)`
+
+- `user` — the authenticated Django user
+- `phone_number` — the verified phone number (string, E.164 format)
+- `request` — the DRF request object
+
+If no callback is configured (the default), this step is skipped.
+
 ## Credits
 This package was created with Cookiecutter_ and the `audreyr/cookiecutter-pypackage`_ project template.
 

@@ -8,6 +8,7 @@ from .base import (DeliveryStatus, External2FAProvider, External2FAResult,
 from .signals import (verification_delivered, verification_delivery_failed,
                       verification_webhook_received)
 from .telnyx import TelnyxVerifyProvider
+from .testing import FakeVerifyProvider
 
 __all__ = [
     # Base types
@@ -25,4 +26,5 @@ __all__ = [
     "verification_delivery_failed",
     # Providers
     "TelnyxVerifyProvider",
+    "FakeVerifyProvider",
 ]
