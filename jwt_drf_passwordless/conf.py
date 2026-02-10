@@ -50,6 +50,7 @@ default_settings = {
             "passwordless_mobile_token_request": "jwt_drf_passwordless.serializers.PasswordlessMobileTokenRequestSerializer",
             "passwordless_email_token_exchange": "jwt_drf_passwordless.serializers.PasswordlessEmailTokenExchangeSerializer",
             "passwordless_mobile_token_exchange": "jwt_drf_passwordless.serializers.PasswordlessMobileTokenExchangeSerializer",
+            "external_mobile_token_exchange": "jwt_drf_passwordless.serializers.ExternalMobileTokenExchangeSerializer",
         }
     ),
     "PERMISSIONS": ObjDict(
@@ -70,11 +71,13 @@ default_settings = {
         }
     ),
     "CONSTANTS": ObjDict({"messages": "jwt_drf_passwordless.constants.Messages"}),
-    "CALLBACKS": ObjDict({
-        # Called after external 2FA verification is accepted, before tokens are returned.
-        # Signature: callback(user, phone_number, request)
-        "on_verification_accepted": None,
-    }),
+    "CALLBACKS": ObjDict(
+        {
+            # Called after external 2FA verification is accepted, before tokens are returned.
+            # Signature: callback(user, phone_number, request)
+            "on_verification_accepted": None,
+        }
+    ),
     # External 2FA provider configuration (e.g., Telnyx, Twilio)
     # Set to None to use internal token generation
     "EXTERNAL_2FA": None,
@@ -98,7 +101,10 @@ class Settings:
         if explicit_overriden_settings is None:
             explicit_overriden_settings = {}
 
-        overriden_settings = (getattr(django_settings, JWT_DRF_PASSWORDLESS_SETTINGS_NAMESPACE, {}) or explicit_overriden_settings)
+        overriden_settings = (
+            getattr(django_settings, JWT_DRF_PASSWORDLESS_SETTINGS_NAMESPACE, {})
+            or explicit_overriden_settings
+        )
 
         self._load_default_settings()
         self._override_settings(overriden_settings)

@@ -1,26 +1,13 @@
 """
-Views for external 2FA verification.
+Webhook view for external 2FA providers.
 
-These views handle the request/verify flow when using an external 2FA provider
-like Telnyx or Twilio. Unlike the internal token flow, the external provider
-generates and stores the verification code.
-
-Flow:
-1. User requests verification → We call provider.send_verification()
-2. Provider sends code to user's phone
-3. User submits code → We call provider.verify_code()
-4. If accepted, we issue JWT tokens
-
-Webhook Flow:
-1. Provider sends webhook to /passwordless/external/webhook/
-2. We parse the webhook and fire Django signals
-3. Application can react to delivery status events
+Receives delivery status updates from providers like Telnyx and fires
+Django signals so the application can react (e.g., logging, alerting).
 """
 
 import json
 import logging
 
-from django.contrib.auth import get_user_model
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework import status
@@ -28,189 +15,10 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from jwt_drf_passwordless import signals as app_signals
-from jwt_drf_passwordless.conf import settings
-from jwt_drf_passwordless.constants import Messages
-
-from . import signals as webhook_signals
-from .base import VerificationStatus, WebhookEventType
-from .serializers import (External2FARequestSerializer,
-                          External2FAVerifySerializer)
+from . import get_external_2fa_provider, signals as webhook_signals
+from .base import WebhookEventType
 
 logger = logging.getLogger(__name__)
-
-User = get_user_model()
-
-
-def get_external_2fa_provider():
-    """
-    Get the configured external 2FA provider instance.
-
-    Returns:
-        External2FAProvider instance or None if not configured
-    """
-    external_2fa_config = getattr(settings, "EXTERNAL_2FA", None)
-    if not external_2fa_config:
-        return None
-
-    provider_class = external_2fa_config.get("provider")
-    if not provider_class:
-        return None
-
-    # Import the provider class if it's a string
-    if isinstance(provider_class, str):
-        from django.utils.module_loading import import_string
-        provider_class = import_string(provider_class)
-
-    # Get configuration for the provider
-    api_key = external_2fa_config.get("api_key", "")
-    verify_profile_id = external_2fa_config.get("verify_profile_id", "")
-    webhook_public_key = external_2fa_config.get("webhook_public_key", "")
-
-    return provider_class(
-        api_key=api_key,
-        verify_profile_id=verify_profile_id,
-        webhook_public_key=webhook_public_key,
-    )
-
-
-class External2FARequestView(APIView):
-    """
-    Request a 2FA verification code via external provider.
-
-    POST /passwordless/external/request/
-    {
-        "phone_number": "+13035551234"
-    }
-
-    Response:
-    {
-        "detail": "Verification code sent."
-    }
-    """
-
-    permission_classes = (AllowAny,)
-    serializer_class = External2FARequestSerializer
-
-    @method_decorator(settings.DECORATORS.token_request_rate_limit_decorator)
-    def post(self, request, *args, **kwargs):
-        # Check if MOBILE is allowed
-        if "MOBILE" not in settings.ALLOWED_PASSWORDLESS_METHODS:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        serializer = self.serializer_class(
-            data=request.data,
-            context={"request": request},
-        )
-        serializer.is_valid(raise_exception=True)
-
-        user = serializer.save()
-        phone_number = str(serializer.validated_data["phone_number"])
-
-        # Check admin restriction
-        if not settings.ALLOW_ADMIN_AUTHENTICATION:
-            if getattr(user, "is_staff", None) or getattr(user, "is_superuser", None):
-                return Response(
-                    {"detail": Messages.CANNOT_SEND_TOKEN},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        # Get the external 2FA provider
-        provider = get_external_2fa_provider()
-        if not provider or not provider.is_configured():
-            return Response(
-                {"detail": "External 2FA provider not configured."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        # Send verification via provider
-        result = provider.send_verification(phone_number)
-
-        if result.success:
-            return Response(
-                {"detail": Messages.TOKEN_SENT},
-                status=status.HTTP_200_OK,
-            )
-        else:
-            return Response(
-                {"detail": result.message or Messages.CANNOT_SEND_TOKEN},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-
-class External2FAVerifyView(APIView):
-    """
-    Verify a 2FA code and exchange for JWT tokens.
-
-    POST /passwordless/external/verify/
-    {
-        "phone_number": "+13035551234",
-        "code": "123456"
-    }
-
-    Response (on success):
-    {
-        "access": "...",
-        "refresh": "..."
-    }
-    """
-
-    permission_classes = (AllowAny,)
-    serializer_class = External2FAVerifySerializer
-
-    @method_decorator(settings.DECORATORS.token_redeem_rate_limit_decorator)
-    def post(self, request, *args, **kwargs):
-        serializer = self.serializer_class(
-            data=request.data,
-            context={"request": request},
-        )
-        serializer.is_valid(raise_exception=True)
-
-        user = serializer.validated_data["user"]
-        phone_number = str(serializer.validated_data["phone_number"])
-        code = serializer.validated_data["code"]
-
-        # Get the external 2FA provider
-        provider = get_external_2fa_provider()
-        if not provider or not provider.is_configured():
-            return Response(
-                {"detail": "External 2FA provider not configured."},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
-
-        # Verify the code with the provider
-        result = provider.verify_code(phone_number, code)
-
-        if result.success and result.status == VerificationStatus.ACCEPTED:
-            # Activate user if needed
-            if not user.is_active:
-                user.is_active = True
-                user.save()
-                app_signals.user_activated.send(
-                    sender=self.__class__,
-                    user=user,
-                    request=request,
-                )
-
-            # Fire callback if configured
-            callback = settings.CALLBACKS.on_verification_accepted
-            if callback:
-                callback(user=user, phone_number=phone_number, request=request)
-
-            # Generate JWT tokens
-            tokens = serializer.generate_auth_token(user)
-            return Response(data=tokens, status=status.HTTP_200_OK)
-
-        elif result.status == VerificationStatus.EXPIRED:
-            return Response(
-                {"detail": "Verification code has expired."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        else:
-            return Response(
-                {"detail": Messages.INVALID_CREDENTIALS_ERROR},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
 
 class External2FAWebhookView(APIView):
@@ -318,7 +126,11 @@ class External2FAWebhookView(APIView):
                     sender=self.__class__,
                     event=event,
                     phone_number=event.phone_number,
-                    error=event.delivery_status.value if event.delivery_status else "unknown",
+                    error=(
+                        event.delivery_status.value
+                        if event.delivery_status
+                        else "unknown"
+                    ),
                 )
 
             return Response({"detail": "OK"}, status=status.HTTP_200_OK)

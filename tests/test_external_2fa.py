@@ -8,16 +8,15 @@ to avoid making actual API calls during testing.
 from unittest.mock import Mock, patch
 
 import pytest
-from django.conf import settings as django_settings
 from django.contrib.auth import get_user_model
-from django.test.utils import override_settings
 from rest_framework import status
 from rest_framework.test import APIClient
 
-from jwt_drf_passwordless.external_2fa.base import (External2FAProvider,
-                                                    External2FAResult,
-                                                    VerificationMethod,
-                                                    VerificationStatus)
+from jwt_drf_passwordless.external_2fa.base import (
+    External2FAResult,
+    VerificationMethod,
+    VerificationStatus,
+)
 from jwt_drf_passwordless.external_2fa.telnyx import TelnyxVerifyProvider
 
 User = get_user_model()
@@ -184,6 +183,7 @@ class TestTelnyxVerifyProvider:
     @patch("jwt_drf_passwordless.external_2fa.telnyx.requests.post")
     def test_send_verification_network_error(self, mock_post):
         import requests
+
         mock_post.side_effect = requests.RequestException("Connection failed")
 
         provider = TelnyxVerifyProvider(
@@ -361,372 +361,6 @@ class TestFakeVerifyProvider:
 
 
 # ============================================================================
-# Mock Provider for View Tests
-# ============================================================================
-
-
-class MockExternal2FAProvider(External2FAProvider):
-    """Mock provider for testing views."""
-
-    def __init__(self, **kwargs):
-        self.send_result = External2FAResult(
-            success=True,
-            status=VerificationStatus.PENDING,
-            verification_id="mock-123",
-        )
-        self.verify_result = External2FAResult(
-            success=True,
-            status=VerificationStatus.ACCEPTED,
-        )
-
-    def send_verification(self, phone_number, method=VerificationMethod.SMS):
-        return self.send_result
-
-    def verify_code(self, phone_number, code):
-        return self.verify_result
-
-    def cancel_verification(self, phone_number):
-        return External2FAResult(success=True, status=VerificationStatus.EXPIRED)
-
-
-# ============================================================================
-# View Integration Tests
-# ============================================================================
-
-
-class CustomTokenResponse:
-    @classmethod
-    def generate_auth_token(cls, user):
-        return {"access": "custom-access", "refresh": "custom-refresh", "custom": True}
-
-
-@pytest.mark.django_db
-class TestExternal2FAViews:
-    """Integration tests for external 2FA views."""
-
-    @pytest.fixture
-    def api_client(self):
-        return APIClient()
-
-    @pytest.fixture
-    def user_with_phone(self):
-        return User.objects.create(
-            username="testuser",
-            email="test@example.com",
-            phone_number="+13035551234",
-        )
-
-    @pytest.fixture
-    def mock_provider(self):
-        return MockExternal2FAProvider()
-
-    @pytest.fixture
-    def external_2fa_settings(self, settings, mock_provider):
-        """Configure external 2FA settings for testing."""
-        settings.JWT_DRF_PASSWORDLESS = {
-            "ALLOWED_PASSWORDLESS_METHODS": ["EMAIL", "MOBILE"],
-            "REGISTER_NONEXISTENT_USERS": False,
-            "EXTERNAL_2FA": {
-                "provider": "tests.test_external_2fa.MockExternal2FAProvider",
-                "api_key": "test_key",
-                "verify_profile_id": "test_profile",
-            },
-        }
-        return settings
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_request_verification_success(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        response = api_client.post(
-            "/passwordless/external/request/",
-            {"phone_number": "+13035551234"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        assert "detail" in response.data
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_request_verification_user_not_found(
-        self, mock_get_provider, api_client
-    ):
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        # Use a valid phone number format for a non-existent user
-        response = api_client.post(
-            "/passwordless/external/request/",
-            {"phone_number": "+12025550198"},  # Non-existent user
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    @patch("jwt_drf_passwordless.external_2fa.serializers.settings")
-    def test_request_verification_creates_user_when_registration_enabled(
-        self, mock_settings, mock_get_provider, api_client
-    ):
-        # Configure mock settings for user registration
-        mock_settings.REGISTER_NONEXISTENT_USERS = True
-        mock_settings.REGISTRATION_SETS_UNUSABLE_PASSWORD = True
-        mock_settings.MOBILE_FIELD_NAME = "phone_number"
-
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        # Use a valid US phone number format (555 is reserved for testing)
-        phone_number = "+12025550199"
-        assert not User.objects.filter(phone_number=phone_number).exists()
-
-        response = api_client.post(
-            "/passwordless/external/request/",
-            {"phone_number": phone_number},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        assert User.objects.filter(phone_number=phone_number).exists()
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_request_verification_provider_not_configured(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        mock_get_provider.return_value = None
-
-        response = api_client.post(
-            "/passwordless/external/request/",
-            {"phone_number": "+13035551234"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_code_success(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "123456"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        assert "access" in response.data
-        assert "refresh" in response.data
-
-    @override_settings(
-        JWT_DRF_PASSWORDLESS=dict(
-            django_settings.JWT_DRF_PASSWORDLESS,
-            **{
-                "SERIALIZERS": {
-                    "passwordless_token_response_class": "tests.test_external_2fa.CustomTokenResponse"
-                }
-            },
-        )
-    )
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_code_honors_custom_token_response_class(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "123456"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        assert response.data["access"] == "custom-access"
-        assert response.data["refresh"] == "custom-refresh"
-        assert response.data["custom"] is True
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_code_rejected(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        mock_provider = MockExternal2FAProvider()
-        mock_provider.verify_result = External2FAResult(
-            success=False,
-            status=VerificationStatus.REJECTED,
-        )
-        mock_get_provider.return_value = mock_provider
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "000000"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_code_expired(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        mock_provider = MockExternal2FAProvider()
-        mock_provider.verify_result = External2FAResult(
-            success=False,
-            status=VerificationStatus.EXPIRED,
-        )
-        mock_get_provider.return_value = mock_provider
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "123456"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        assert "expired" in response.data["detail"].lower()
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_activates_inactive_user(
-        self, mock_get_provider, api_client, user_with_phone
-    ):
-        user_with_phone.is_active = False
-        user_with_phone.save()
-
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "123456"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-
-        user_with_phone.refresh_from_db()
-        assert user_with_phone.is_active is True
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_calls_on_verification_accepted_callback(
-        self, mock_get_provider, api_client, user_with_phone, settings
-    ):
-        """Callback is called on successful verification with correct args."""
-        mock_provider = MockExternal2FAProvider()
-        mock_get_provider.return_value = mock_provider
-
-        callback = Mock()
-        settings.JWT_DRF_PASSWORDLESS = {
-            "ALLOWED_PASSWORDLESS_METHODS": ["EMAIL", "MOBILE"],
-            "CALLBACKS": {
-                "on_verification_accepted": callback,
-            },
-        }
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "123456"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_200_OK
-        callback.assert_called_once()
-        call_kwargs = callback.call_args[1]
-        assert call_kwargs["user"] == user_with_phone
-        assert call_kwargs["phone_number"] == "+13035551234"
-        assert "request" in call_kwargs
-
-    @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
-    def test_verify_callback_not_called_on_rejection(
-        self, mock_get_provider, api_client, user_with_phone, settings
-    ):
-        """Callback is NOT called when verification is rejected."""
-        mock_provider = MockExternal2FAProvider()
-        mock_provider.verify_result = External2FAResult(
-            success=False,
-            status=VerificationStatus.REJECTED,
-        )
-        mock_get_provider.return_value = mock_provider
-
-        callback = Mock()
-        settings.JWT_DRF_PASSWORDLESS = {
-            "ALLOWED_PASSWORDLESS_METHODS": ["EMAIL", "MOBILE"],
-            "CALLBACKS": {
-                "on_verification_accepted": callback,
-            },
-        }
-
-        response = api_client.post(
-            "/passwordless/external/verify/",
-            {"phone_number": "+13035551234", "code": "000000"},
-            format="json",
-        )
-
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
-        callback.assert_not_called()
-
-
-# ============================================================================
-# Serializer Tests
-# ============================================================================
-
-
-@pytest.mark.django_db
-class TestExternal2FASerializers:
-    """Tests for external 2FA serializers."""
-
-    @pytest.fixture
-    def user_with_phone(self):
-        return User.objects.create(
-            username="testuser",
-            email="test@example.com",
-            phone_number="+13035551234",
-        )
-
-    def test_request_serializer_valid(self, user_with_phone):
-        from jwt_drf_passwordless.external_2fa.serializers import \
-            External2FARequestSerializer
-
-        serializer = External2FARequestSerializer(
-            data={"phone_number": "+13035551234"}
-        )
-        assert serializer.is_valid()
-        assert serializer.validated_data["user"] == user_with_phone
-
-    def test_request_serializer_invalid_phone(self):
-        from jwt_drf_passwordless.external_2fa.serializers import \
-            External2FARequestSerializer
-
-        serializer = External2FARequestSerializer(
-            data={"phone_number": "invalid"}
-        )
-        assert not serializer.is_valid()
-
-    def test_verify_serializer_valid(self, user_with_phone):
-        from jwt_drf_passwordless.external_2fa.serializers import \
-            External2FAVerifySerializer
-
-        serializer = External2FAVerifySerializer(
-            data={"phone_number": "+13035551234", "code": "123456"}
-        )
-        assert serializer.is_valid()
-        assert serializer.validated_data["user"] == user_with_phone
-
-    def test_verify_serializer_user_not_found(self):
-        from jwt_drf_passwordless.external_2fa.serializers import \
-            External2FAVerifySerializer
-
-        serializer = External2FAVerifySerializer(
-            data={"phone_number": "+19995551234", "code": "123456"}
-        )
-        assert not serializer.is_valid()
-
-
-# ============================================================================
 # Webhook Tests
 # ============================================================================
 
@@ -757,9 +391,11 @@ class TestWebhookEvent:
     """Tests for WebhookEvent dataclass."""
 
     def test_webhook_event_creation(self):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEvent,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEvent,
+            WebhookEventType,
+        )
 
         event = WebhookEvent(
             event_type=WebhookEventType.DELIVERED,
@@ -790,8 +426,10 @@ class TestTelnyxWebhookParsing:
         )
 
     def test_parse_verify_sent_webhook(self, provider):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEventType,
+        )
 
         payload = {
             "data": {
@@ -816,8 +454,10 @@ class TestTelnyxWebhookParsing:
         assert event.provider == "telnyx"
 
     def test_parse_verify_delivered_webhook(self, provider):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEventType,
+        )
 
         payload = {
             "data": {
@@ -838,8 +478,10 @@ class TestTelnyxWebhookParsing:
         assert event.delivery_status == DeliveryStatus.DELIVERED
 
     def test_parse_verify_failed_webhook(self, provider):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEventType,
+        )
 
         payload = {
             "data": {
@@ -890,9 +532,11 @@ class TestWebhookView:
 
     @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
     def test_webhook_delivered_event(self, mock_get_provider, api_client):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEvent,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEvent,
+            WebhookEventType,
+        )
 
         mock_provider = Mock()
         mock_provider.parse_webhook.return_value = WebhookEvent(
@@ -923,9 +567,11 @@ class TestWebhookView:
 
     @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
     def test_webhook_failed_event(self, mock_get_provider, api_client):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEvent,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEvent,
+            WebhookEventType,
+        )
 
         mock_provider = Mock()
         mock_provider.parse_webhook.return_value = WebhookEvent(
@@ -982,11 +628,15 @@ class TestWebhookView:
 
     @patch("jwt_drf_passwordless.external_2fa.views.get_external_2fa_provider")
     def test_webhook_fires_signals(self, mock_get_provider, api_client):
-        from jwt_drf_passwordless.external_2fa.base import (DeliveryStatus,
-                                                            WebhookEvent,
-                                                            WebhookEventType)
+        from jwt_drf_passwordless.external_2fa.base import (
+            DeliveryStatus,
+            WebhookEvent,
+            WebhookEventType,
+        )
         from jwt_drf_passwordless.external_2fa.signals import (
-            verification_delivered, verification_webhook_received)
+            verification_delivered,
+            verification_webhook_received,
+        )
 
         mock_provider = Mock()
         mock_provider.parse_webhook.return_value = WebhookEvent(

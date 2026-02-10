@@ -1,7 +1,7 @@
 from django.urls import re_path
 
 from . import views
-from .external_2fa import views as external_2fa_views
+from .external_2fa.views import External2FAWebhookView
 
 urlpatterns = [
     re_path(
@@ -24,20 +24,10 @@ urlpatterns = [
         views.EmailExchangePasswordlessTokenForAuthTokenView.as_view(),
         name="email_passwordless_token_exchange",
     ),
-    # External 2FA provider endpoints (Telnyx, Twilio, etc.)
-    re_path(
-        r"^external/request/$",
-        external_2fa_views.External2FARequestView.as_view(),
-        name="external_2fa_request",
-    ),
-    re_path(
-        r"^external/verify/$",
-        external_2fa_views.External2FAVerifyView.as_view(),
-        name="external_2fa_verify",
-    ),
+    # External 2FA provider webhook (Telnyx, Twilio, etc.)
     re_path(
         r"^external/webhook/$",
-        external_2fa_views.External2FAWebhookView.as_view(),
+        External2FAWebhookView.as_view(),
         name="external_2fa_webhook",
     ),
 ]

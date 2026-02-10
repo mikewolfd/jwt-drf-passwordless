@@ -173,7 +173,7 @@ curl --request POST \
 
 ##### External 2FA Provider
 
-To use an external 2FA provider like Telnyx or Twilio instead of internal token generation:
+When `EXTERNAL_2FA` is configured, the `/request/mobile/` and `/exchange/mobile/` endpoints automatically delegate to the external provider instead of using internal token generation. The API contract is unchanged — same field names (`phone_number`, `token`), same response shape.
 
 ```.py
 JWT_DRF_PASSWORDLESS = {

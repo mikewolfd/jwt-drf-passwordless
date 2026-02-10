@@ -160,3 +160,42 @@ class PasswordlessMobileTokenExchangeSerializer(
     AbstractPasswordlessTokenExchangeSerializer,
 ):
     pass
+
+
+class ExternalMobileTokenExchangeSerializer(serializers.Serializer):
+    """
+    Validates phone_number + token for external provider exchange.
+
+    Uses the same field names as the internal mobile exchange serializer
+    so the API contract is unchanged, but does NOT call
+    PasswordlessTokenService.check_token() — the external provider
+    handles code verification.
+    """
+
+    token = serializers.CharField(required=True)
+
+    @property
+    def token_serializer_class(self):
+        custom_class = settings.SERIALIZERS.passwordless_token_response_class
+        if custom_class is not None:
+            return custom_class
+        return PasswordlessJwtRefreshTokenResponse
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields[settings.MOBILE_FIELD_NAME] = PhoneNumberField(required=True)
+
+    def validate(self, attrs):
+        validated_data = super().validate(attrs)
+        phone_number = validated_data[settings.MOBILE_FIELD_NAME]
+
+        try:
+            user = User.objects.get(**{settings.MOBILE_FIELD_NAME: phone_number})
+        except User.DoesNotExist:
+            raise serializers.ValidationError(Messages.INVALID_CREDENTIALS_ERROR)
+
+        validated_data["user"] = user
+        return validated_data
+
+    def generate_auth_token(self, user):
+        return self.token_serializer_class.generate_auth_token(user)
