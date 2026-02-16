@@ -70,16 +70,14 @@ When using external 2FA providers, always enable webhook signature verification 
 
 #### Available URLS
 
-**Internal Token Flow** (tokens generated and stored locally):
+**Authentication Flow** (Internal or External depending on config):
 * `request/email/` - Request token via email
 * `request/mobile/` - Request token via SMS
 * `exchange/email/` - Exchange email token for JWT
 * `exchange/mobile/` - Exchange mobile token for JWT
+* `external/webhook/` - Receive delivery status webhooks (for External 2FA)
 
-**External 2FA Flow** (tokens managed by external provider):
-* `external/request/` - Request verification via external provider
-* `external/verify/` - Verify code and get JWT tokens
-* `external/webhook/` - Receive delivery status webhooks
+
 
 **Requesting a token**
 ```.sh
@@ -119,7 +117,7 @@ When using an external provider like Telnyx Verify, the provider handles code ge
 **Requesting verification via external provider**
 ```.sh
 curl --request POST \
-  --url http://localhost:8000/passwordless/external/request/ \
+  --url http://localhost:8000/passwordless/request/mobile/ \
   --header 'Content-Type: application/json' \
   --data '{
 	"phone_number": "+13035551234"
@@ -135,11 +133,11 @@ Response
 **Verifying code and getting JWT tokens**
 ```.sh
 curl --request POST \
-  --url http://localhost:8000/passwordless/external/verify/ \
+  --url http://localhost:8000/passwordless/exchange/mobile/ \
   --header 'Content-Type: application/json' \
   --data '{
 	"phone_number": "+13035551234",
-	"code": "123456"
+	"token": "123456"
 }'
 ```
 ```.json
@@ -259,7 +257,7 @@ JWT_DRF_PASSWORDLESS = {
 }
 ```
 
-In your tests, POST to `/passwordless/external/verify/` with `"code": "12345"` and it will succeed. To use a custom code:
+In your tests, POST to `/passwordless/exchange/mobile/` with `"token": "12345"` and it will succeed. To use a custom code:
 
 ```.py
 JWT_DRF_PASSWORDLESS = {
