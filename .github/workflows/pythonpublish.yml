@@ -2,24 +2,42 @@ name: Upload Python Package
 
 on:
   release:
-    types: [created, edited]
+    types: [published]
+
+permissions:
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v1
+    - uses: actions/checkout@v7
     - name: Set up Python
-      uses: actions/setup-python@v1
+      uses: actions/setup-python@v7
       with:
         python-version: '3.12'
-    - name: Install dependencies
+    - name: Check release version
+      env:
+        RELEASE_TAG: ${{ github.event.release.tag_name }}
       run: |
-        python3 -m pip install --upgrade pip
-        python3 -m pip install setuptools wheel twine poetry
-    - name: Build and publish
+        python - <<'PY'
+        import os
+        import tomllib
+        from pathlib import Path
+
+        version = tomllib.loads(Path("pyproject.toml").read_text())["tool"]["poetry"]["version"]
+        if os.environ["RELEASE_TAG"] != f"v{version}":
+            raise SystemExit("Release tag must match the package version")
+        PY
+    - name: Build and check distributions
+      run: |
+        python -m pip install "poetry==2.4.3" twine
+        poetry check --lock
+        poetry build
+        python -m twine check dist/*
+    - name: Publish distributions
       env:
         TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
         TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
       run: |
-        poetry build
-        twine upload dist/*
+        python -m twine upload --non-interactive dist/*

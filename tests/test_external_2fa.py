@@ -5,9 +5,11 @@ These tests verify the external 2FA flow using mocked providers
 to avoid making actual API calls during testing.
 """
 
+import base64
 from unittest.mock import Mock, patch
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.test import APIClient
@@ -710,6 +712,28 @@ class TestWebhookView:
 
 class TestTelnyxSignatureVerification:
     """Tests for Telnyx webhook signature verification."""
+
+    @pytest.mark.parametrize("tampered", [False, True])
+    def test_signed_webhook_accepts_only_the_original_payload(self, tampered):
+        private_key = Ed25519PrivateKey.generate()
+        provider = TelnyxVerifyProvider(
+            api_key="test_key",
+            verify_profile_id="test_profile",
+            webhook_public_key=base64.b64encode(
+                private_key.public_key().public_bytes_raw()
+            ).decode(),
+        )
+        timestamp = "1750000000"
+        payload = b'{"data": {"event_type": "verify.delivered"}}'
+        signature = base64.b64encode(
+            private_key.sign(timestamp.encode() + b"|" + payload)
+        ).decode()
+
+        assert provider.verify_webhook_signature(
+            payload=payload + b" " if tampered else payload,
+            signature=signature,
+            timestamp=timestamp,
+        ) is not tampered
 
     def test_no_public_key_returns_true(self):
         """Without a public key, verification is skipped (returns True)."""
